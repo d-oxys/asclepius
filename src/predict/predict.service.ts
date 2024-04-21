@@ -1,69 +1,65 @@
-import { Injectable } from '@nestjs/common';
-import { Storage } from '@google-cloud/storage';
+import { Injectable, OnModuleInit } from '@nestjs/common';
 import * as tf from '@tensorflow/tfjs-node';
-import { Image, createCanvas } from 'canvas';
+import * as path from 'path';
+import * as jpeg from 'jpeg-js';
+import * as dotenv from 'dotenv';
 
+dotenv.config();
 @Injectable()
-export class ModelService {
-  private model;
+export class ModelService implements OnModuleInit {
+  private model: tf.GraphModel;
+  private modelPromise: Promise<tf.GraphModel>;
 
-  async downloadModel() {
-    const storage = new Storage();
-    const options = {
-      destination: './model.json',
-    };
-
-    await storage
-      .bucket('bucket-submissionmlgc-michsannr')
-      .file('model-in-prod/model.json')
-      .download(options);
-
-    console.log(
-      `gs://bucket-submissionmlgc-michsannr/model-in-prod/model.json downloaded to ./models/model.json.`,
-    );
+  async onModuleInit(): Promise<void> {
+    this.model = await this.loadModel();
   }
 
-  async loadModel() {
-    this.model = await tf.loadLayersModel('file://./model.json');
+  constructor() {
+    this.modelPromise = this.loadModel();
   }
 
-  getModel() {
-    return this.model;
+  private modelUrl: string = process.env.MODEL_URL;
+
+  async loadModel(): Promise<tf.GraphModel> {
+    const model = await tf.loadGraphModel(this.modelUrl);
+    return model;
+  }
+  async predict(imageBuffer: Buffer) {
+    console.log('Starting prediction...');
+    // Convert imageBuffer to tensor
+    const tensor = this.imageToTensor(imageBuffer);
+    const prediction = this.model.predict(tensor);
+    // Interpret the prediction
+    const label = this.interpretPrediction(prediction);
+    return label;
   }
 
-  async predict(file: Express.Multer.File) {
-    const imageBuffer = file.buffer;
-    const model = this.getModel();
+  interpretPrediction(prediction) {
+    // Assuming your model outputs a single number between 0 and 1
+    const predictionValue = prediction.dataSync()[0];
+    return predictionValue;
+  }
 
-    // Ubah buffer menjadi gambar
-    const img = new Image();
-    img.src = imageBuffer;
+  imageToTensor(imageBuffer: Buffer) {
+    const TO_UINT8ARRAY = true;
+    const { width, height, data } = jpeg.decode(imageBuffer, {
+      useTArray: true,
+    });
+    let offset = 0; // offset into original data
+    let buffer = new Uint8Array(width * height * 3);
+    for (let i = 0; i < buffer.length; i += 3) {
+      buffer[i] = data[offset];
+      buffer[i + 1] = data[offset + 1];
+      buffer[i + 2] = data[offset + 2];
 
-    // Buat canvas dengan ukuran yang sama dengan gambar
-    const canvas = createCanvas(img.width, img.height);
-    const ctx = canvas.getContext('2d');
+      offset += 4;
+    }
+    let tensor = tf.tensor3d(buffer, [width, height, 3]);
+    // Add a dimension for the batch
+    tensor = tensor.expandDims(0);
+    // Resize to the expected model input size
+    tensor = tf.image.resizeBilinear(tensor, [224, 224]);
 
-    // Gambar gambar ke canvas
-    ctx.drawImage(img, 0, 0, img.width, img.height);
-
-    // Dapatkan ImageData dari canvas
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-
-    // Ubah ImageData menjadi tensor 4D
-    const tensor = tf.tensor3d(Array.from(imageData.data), [
-      imageData.width,
-      imageData.height,
-      4,
-    ]);
-
-    // Lakukan preprocessing gambar di sini (misalnya, resize, normalisasi, dll.)
-
-    // Jalankan prediksi dengan model
-    const prediction = model.predict(tensor);
-
-    // Ubah hasil prediksi menjadi array JavaScript
-    const result = await prediction.array();
-
-    return result;
+    return tensor;
   }
 }
